@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>反馈系统</title>
+<style>
+  :root{
+    --bg:#ffffff; --bg2:#f7f8fa; --bg3:#eef1f6;
+    --text:#1a1a2e; --text2:#4a5568; --text3:#8896ab;
+    --border:#dde3ed;
+    --accent:#2f7cf6; --accent-hover:#1e63d0;
+    --success:#10b981; --danger:#ef4444; --warning:#f59e0b;
+    --accent-soft:#e8f1fe; --success-soft:#e6f9f1; --danger-soft:#fde8e8; --warning-soft:#fef4e0;
+    --radius:14px; --radius-sm:8px;
+    --shadow:0 1px 3px rgba(0,0,0,.06);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg2);color:var(--text);font-size:14px;line-height:1.5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;padding:16px}
+  .wrap{max-width:860px;margin:0 auto}
+  h1{font-size:20px;font-weight:800;display:flex;align-items:center;gap:8px;margin-bottom:14px}
+  h1 svg{width:24px;height:24px;color:var(--accent)}
+  .muted{color:var(--text3);font-size:12px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .hidden{display:none!important}
+
+  .tabs{display:flex;gap:8px;margin-bottom:14px}
+  .tab{padding:8px 18px;border-radius:20px;border:1px solid var(--border);background:var(--bg);cursor:pointer;font-weight:600;font-size:13px;color:var(--text2)}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+  .stat{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:18px 10px;text-align:center;box-shadow:var(--shadow)}
+  .stat .num{font-size:26px;font-weight:800}
+  .stat .lbl{color:var(--text2);margin-top:4px;font-size:13px}
+  .stat.total .num{color:var(--accent)}
+  .stat.pending .num{color:var(--warning)}
+  .stat.replied .num{color:var(--success)}
+
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  select,input[type=text],input[type=number],textarea{
+    padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg);
+    color:var(--text);font-size:13px;font-family:inherit;outline:none}
+  select:focus,input:focus,textarea:focus{border-color:var(--accent)}
+  textarea{width:100%;min-height:70px;resize:vertical}
+  input[type=text],input[type=number]{min-width:0}
+
+  .btn{padding:7px 16px;border-radius:20px;border:1px solid var(--border);background:var(--bg);color:var(--text);
+    font-weight:600;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .12s}
+  .btn:hover{background:var(--bg3)}
+  .btn-pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn-pri:hover{background:var(--accent-hover)}
+  .btn-ok{background:var(--success);color:#fff;border-color:var(--success)}
+  .btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+  .btn-sm{padding:6px 14px;font-size:12px}
+
+  .card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);margin-bottom:14px}
+  .fb-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .fb-id{font-size:17px;font-weight:800}
+  .badge{padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:4px}
+  .badge.pending{background:var(--warning-soft);color:var(--warning)}
+  .badge.done{background:var(--success-soft);color:var(--success)}
+  .badge.doing{background:var(--accent-soft);color:var(--accent)}
+  .badge.rejected{background:var(--danger-soft);color:var(--danger)}
+  .badge.type{background:var(--bg3);color:var(--text2)}
+  .fb-content{margin:10px 0 6px;font-size:15px;white-space:pre-wrap;word-break:break-all}
+  .fb-meta{display:flex;gap:16px;color:var(--text3);font-size:12px;flex-wrap:wrap}
+  .fb-reply{background:var(--bg3);border-radius:var(--radius-sm);padding:10px 12px;margin-top:10px}
+  .fb-reply .rt{color:var(--accent);font-weight:700;font-size:13px;margin-bottom:4px}
+  .fb-reply .rc{white-space:pre-wrap;word-break:break-all}
+  .fb-actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .edit-area{margin-top:10px;display:flex;flex-direction:column;gap:8px}
+  .edit-area .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+  .pager{display:flex;gap:6px;align-items:center;justify-content:center;margin:14px 0}
+  .pager .btn{padding:5px 12px}
+  .empty{text-align:center;color:var(--text3);padding:30px 0}
+
+  .form-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .form-row label{min-width:130px;font-weight:600;font-size:13px}
+  .switch{position:relative;width:42px;height:24px;flex-shrink:0}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:#cbd5e1;border-radius:24px;cursor:pointer;transition:.2s}
+  .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+  .switch input:checked + .slider{background:var(--success)}
+  .switch input:checked + .slider:before{transform:translateX(18px)}
+
+  .toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:var(--text);color:#fff;
+    padding:9px 20px;border-radius:20px;font-size:13px;z-index:99;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .tip{background:var(--accent-soft);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;color:var(--text2);line-height:1.8;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>反馈列表</h1>
+
+  <div class="tabs">
+    <div class="tab active" id="tab-list" onclick="switchTab('list')">反馈列表</div>
+    <div class="tab" id="tab-settings" onclick="switchTab('settings')">设置</div>
+  </div>
+
+  <!-- 列表页 -->
+  <div id="page-list">
+    <div class="stats">
+      <div class="stat total"><div class="num" id="st-total">0</div><div class="lbl">全部反馈</div></div>
+      <div class="stat pending"><div class="num" id="st-pending">0</div><div class="lbl">待处理</div></div>
+      <div class="stat replied"><div class="num" id="st-replied">0</div><div class="lbl">已回复</div></div>
+    </div>
+
+    <div class="bar">
+      <select id="f-status" onchange="loadList(1)">
+        <option value="">全部状态</option>
+        <option value="待处理">待处理</option>
+        <option value="处理中">处理中</option>
+        <option value="已完成">已完成</option>
+        <option value="已拒绝">已拒绝</option>
+        <option value="已回复">已回复</option>
+        <option value="未回复">未回复</option>
+      </select>
+      <select id="f-type" onchange="loadList(1)">
+        <option value="">全部分类</option>
+        <option>建议</option><option>Bug</option><option>修改</option><option>创意</option><option>其他</option>
+      </select>
+      <input type="text" id="f-q" placeholder="搜索内容/回复" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')loadList(1)">
+      <button class="btn" onclick="loadList(1)">搜索</button>
+      <button class="btn" onclick="refresh()">刷新</button>
+    </div>
+
+    <div id="fb-list"></div>
+    <div id="fb-empty" class="empty hidden">暂无反馈</div>
+    <div class="pager" id="fb-pager"></div>
+    <div class="muted" style="text-align:center" id="fb-stat"></div>
+  </div>
+
+  <!-- 设置页 -->
+  <div id="page-settings" class="hidden">
+    <div class="card">
+      <div class="tip">
+        用户指令：<b>反馈/建议/bug/修改/创意 内容</b> 提交（发「反馈」看指引）；<b>我的反馈</b>、<b>查询反馈 编号</b>、<b>删除反馈 编号</b>。<br>
+        管理指令（唯一管理员/主人）：<b>回复反馈 编号 内容</b>、<b>处理反馈 编号 状态</b>、<b>设置反馈管理员 ID</b>（仅主人）。
+      </div>
+      <div class="form-row"><label>反馈系统总开关</label>
+        <label class="switch"><input type="checkbox" id="cfg-enabled"><span class="slider"></span></label></div>
+      <div class="form-row"><label>内容百度审核</label>
+        <label class="switch"><input type="checkbox" id="cfg-censor"><span class="slider"></span></label></div>
+      <div class="form-row"><label>提交冷却 (秒)</label>
+        <input type="number" id="cfg-cooldown" min="0" style="width:110px"></div>
+      <div class="form-row"><label>每人每日上限</label>
+        <input type="number" id="cfg-daily" min="0" style="width:110px"><span class="muted">0 = 不限</span></div>
+      <div class="form-row"><label>唯一管理员 ID</label>
+        <input type="text" id="cfg-admin" placeholder="用户 user_id" style="width:280px"></div>
+      <div class="form-row"><label>百度审核 API Key</label>
+        <input type="text" id="cfg-bkey" placeholder="留空使用内置" style="width:280px"></div>
+      <div class="form-row"><label>百度审核 Secret</label>
+        <input type="text" id="cfg-bsecret" placeholder="留空使用内置" style="width:280px"></div>
+      <button class="btn btn-pri" onclick="saveConfig()">保存设置</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const TOKEN = qs.get('token') || '';
+const _bm = location.pathname.match(/^(.*)\/api\/web-pages\//);
+const API = (_bm ? _bm[1] : '') + '/api/ext/feedback';
+const PAGE_SIZE = 10;
+let PAGE = 1;
+
+const STATUS_CLS = {'待处理':'pending','处理中':'doing','已完成':'done','已拒绝':'rejected'};
+
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
+function hdr(){ return {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}; }
+
+async function api(path, method, body){
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(API+path+((method||'GET')==='GET'?(sep+'token='+TOKEN):''), {
+    method: method||'GET', headers: hdr(), body: body?JSON.stringify(body):undefined });
+  return r.json();
+}
+
+function switchTab(name){
+  ['list','settings'].forEach(n=>{
+    $('tab-'+n).classList.toggle('active', n===name);
+    $('page-'+n).classList.toggle('hidden', n!==name);
+  });
+}
+
+async function refresh(){
+  await Promise.all([loadStatus(), loadList()]);
+}
+
+async function loadStatus(){
+  const j = await api('/status');
+  const d = j.data||{};
+  $('st-total').textContent = d.total||0;
+  $('st-pending').textContent = d.pending||0;
+  $('st-replied').textContent = d.replied||0;
+  $('cfg-enabled').checked = !!d.enabled;
+  $('cfg-censor').checked = !!d.censor_enabled;
+  $('cfg-cooldown').value = d.cooldown!=null?d.cooldown:60;
+  $('cfg-daily').value = d.daily_limit!=null?d.daily_limit:5;
+  $('cfg-admin').value = d.super_admin||'';
+  $('cfg-bkey').value = d.baidu_key||'';
+  $('cfg-bsecret').value = d.baidu_secret||'';
+}
+
+async function saveConfig(){
+  const j = await api('/config','POST',{
+    enabled: $('cfg-enabled').checked,
+    censor_enabled: $('cfg-censor').checked,
+    cooldown: parseInt($('cfg-cooldown').value||'0',10),
+    daily_limit: parseInt($('cfg-daily').value||'0',10),
+    super_admin: $('cfg-admin').value.trim(),
+    baidu_key: $('cfg-bkey').value.trim(),
+    baidu_secret: $('cfg-bsecret').value.trim(),
+  });
+  toast(j.message || (j.success?'已保存':'保存失败'));
+}
+
+function fbCard(r){
+  const cls = STATUS_CLS[r.status]||'pending';
+  const badge = r.reply
+    ? '<span class="badge done">✔ 已回复</span>'
+    : `<span class="badge ${cls}">${r.status==='待处理'?'🕐 ':''}${esc(r.status)}</span>`;
+  const reply = r.reply ? `
+    <div class="fb-reply">
+      <div class="rt">💬 回复</div>
+      <div class="rc">${esc(r.reply)}</div>
+      <div class="muted" style="margin-top:4px">⏱ ${esc(r.replied_at||'')}</div>
+    </div>` : '';
+  return `<div class="card" id="fb-${r.id}">
+    <div class="fb-head">
+      <span class="fb-id">#${r.id}</span>
+      <span>${'<span class="badge type">'+esc(r.type)+'</span> '}${badge}</span>
+    </div>
+    <div class="fb-content">${esc(r.content)}</div>
+    <div class="fb-meta">
+      <span>👤 ${esc(r.user_id)}</span>
+      ${r.group_id?`<span>👥 ${esc(r.group_id)}</span>`:''}
+      <span>🕐 ${esc(r.created_at||'')}</span>
+    </div>
+    ${reply}
+    <div class="fb-actions">
+      <button class="btn btn-pri btn-sm" onclick="showReply(${r.id})">💬 回复</button>
+      <button class="btn btn-ok btn-sm" onclick="showEdit(${r.id})">✏️ 修改</button>
+      <button class="btn btn-danger btn-sm" onclick="delFb(${r.id})">🗑 删除</button>
+    </div>
+    <div class="edit-area hidden" id="reply-${r.id}">
+      <textarea id="reply-text-${r.id}" placeholder="回复内容 (清空提交可撤销回复)">${esc(r.reply||'')}</textarea>
+      <div class="row">
+        <button class="btn btn-pri btn-sm" onclick="submitReply(${r.id})">提交回复</button>
+        <button class="btn btn-sm" onclick="$('reply-${r.id}').classList.add('hidden')">取消</button>
+      </div>
+    </div>
+    <div class="edit-area hidden" id="edit-${r.id}">
+      <textarea id="edit-content-${r.id}">${esc(r.content)}</textarea>
+      <div class="row">
+        <select id="edit-type-${r.id}">
+          ${['建议','Bug','修改','创意','其他'].map(t=>`<option${t===r.type?' selected':''}>${t}</option>`).join('')}
+        </select>
+        <select id="edit-status-${r.id}">
+          ${['待处理','处理中','已完成','已拒绝'].map(s=>`<option${s===r.status?' selected':''}>${s}</option>`).join('')}
+        </select>
+        <button class="btn btn-pri btn-sm" onclick="submitEdit(${r.id})">保存修改</button>
+        <button class="btn btn-sm" onclick="$('edit-${r.id}').classList.add('hidden')">取消</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadList(page){
+  if(page) PAGE = page;
+  const params = new URLSearchParams({page: PAGE});
+  const st = $('f-status').value, tp = $('f-type').value, q = $('f-q').value.trim();
+  if(st) params.set('status', st);
+  if(tp) params.set('type', tp);
+  if(q) params.set('q', q);
+  const j = await api('/list?'+params.toString());
+  const rows = j.data||[];
+  const total = j.total!=null?j.total:rows.length;
+  if(!rows.length && PAGE>1) return loadList(PAGE-1);
+  $('fb-list').innerHTML = rows.map(fbCard).join('');
+  $('fb-empty').classList.toggle('hidden', rows.length>0);
+  $('fb-stat').textContent = `共 ${total} 条反馈 | 每页 ${j.page_size||PAGE_SIZE} 条`;
+  renderPager(total, j.page_size||PAGE_SIZE);
+}
+
+function renderPager(total, ps){
+  const pages = Math.max(1, Math.ceil(total/ps));
+  $('fb-pager').innerHTML = pages<=1 ? '' :
+    `<button class="btn" ${PAGE<=1?'disabled':''} onclick="loadList(${PAGE-1})">上一页</button>
+     <span class="muted">${PAGE} / ${pages}</span>
+     <button class="btn" ${PAGE>=pages?'disabled':''} onclick="loadList(${PAGE+1})">下一页</button>`;
+}
+
+function showReply(id){
+  $('edit-'+id).classList.add('hidden');
+  $('reply-'+id).classList.toggle('hidden');
+}
+function showEdit(id){
+  $('reply-'+id).classList.add('hidden');
+  $('edit-'+id).classList.toggle('hidden');
+}
+
+async function submitReply(id){
+  const j = await api('/reply','POST',{id, reply: $('reply-text-'+id).value.trim()});
+  toast(j.message||'完成');
+  await refresh();
+}
+
+async function submitEdit(id){
+  const j = await api('/update','POST',{
+    id,
+    content: $('edit-content-'+id).value.trim(),
+    type: $('edit-type-'+id).value,
+    status: $('edit-status-'+id).value,
+  });
+  toast(j.message||'完成');
+  await refresh();
+}
+
+async function delFb(id){
+  if(!confirm('确定删除反馈 #'+id+' 吗？')) return;
+  const j = await api('/delete','POST',{id});
+  toast(j.message||'完成');
+  await refresh();
+}
+
+refresh();
+</script>
+</body>
+</html>
