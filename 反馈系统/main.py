@@ -1,8 +1,10 @@
 """反馈系统 — 用户反馈/建议/Bug/创意收集 + 后台管理面板
 
 功能概览:
-  提交 (群聊/私聊均可):
-    反馈 <内容>            默认分类「其他」
+  提交 (群聊/私聊均可, 支持带图):
+    反馈 <内容>            默认分类「其他」; 消息附带图片时一并记录
+                          (图片先过百度图片审核, 通过后备份到子频道图床
+                           拼永久链接, 未配置/失败则存本地)
     建议 <内容> / bug <内容> / 修改 <内容> / 创意 <内容>  按分类提交
     反馈                   (无内容) 发送 MD 格式的填写指引 + 快捷按钮
 
@@ -11,7 +13,9 @@
     查询反馈 <编号>        查看单条详情 (含管理员回复); 仅本人或管理员可查
 
   管理 (唯一管理员/框架主人):
-    回复反馈 <编号> <内容>  回复后用户查询即可看到
+    回复反馈 <编号> <内容>  回复后主动消息提醒用户;
+                           主动发送失败则转用户下次发言时被动提醒
+                           (带回车指令按钮, 最多提醒两次, 查看后不再提醒)
     处理反馈 <编号> <状态>  状态: 待处理/处理中/已完成/已拒绝
     删除反馈 <编号>
 
@@ -25,9 +29,12 @@
 """
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime
@@ -57,6 +64,8 @@ _BASE = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.path.join(_BASE, 'data')
 os.makedirs(_DATA_DIR, exist_ok=True)
 _DB_PATH = os.path.join(_DATA_DIR, 'feedback.db')
+_IMG_DIR = os.path.join(_DATA_DIR, 'images')
+os.makedirs(_IMG_DIR, exist_ok=True)
 _HTML_PATH = os.path.join(_BASE, 'panel.html')
 
 _PAGE_KEY = 'feedback-system'
@@ -84,6 +93,9 @@ _DEFAULT_CONFIG = {
     'cooldown': '60',            # 提交冷却 (秒)
     'daily_limit': '5',          # 每人每日提交上限
     'censor_enabled': '1',       # 内容百度审核
+    'img_censor_enabled': '1',   # 图片百度审核 (鉴黄等)
+    'notify_enabled': '1',       # 回复后提醒用户
+    'sub_channel_id': '',        # 图床备份子频道 ID (空=不备份, 图片存本地)
     'super_admin': '',           # 唯一管理员 user_id (可回复/处理/删除任意反馈)
     'baidu_key': '',
     'baidu_secret': '',
@@ -122,10 +134,18 @@ def _ensure_db() -> sqlite3.Connection:
                 status     TEXT DEFAULT '待处理',
                 reply      TEXT DEFAULT '',
                 replied_at TEXT DEFAULT '',
-                created_at TEXT DEFAULT ''
+                created_at TEXT DEFAULT '',
+                images     TEXT DEFAULT '[]',
+                notified   INTEGER DEFAULT 0,
+                viewed     INTEGER DEFAULT 1
             );
             """
         )
+        for col, decl in (('images', "TEXT DEFAULT '[]'"),
+                          ('notified', 'INTEGER DEFAULT 0'),
+                          ('viewed', 'INTEGER DEFAULT 1')):
+            with contextlib.suppress(sqlite3.OperationalError):
+                _conn.execute(f'ALTER TABLE feedbacks ADD COLUMN {col} {decl}')
         _conn.commit()
     return _conn
 
@@ -165,12 +185,14 @@ async def _all_cfg() -> dict:
 
 # ---- feedbacks ----
 
-async def _add_feedback(user_id: str, group_id: str, ftype: str, content: str) -> int:
+async def _add_feedback(user_id: str, group_id: str, ftype: str, content: str,
+                        images: list | None = None) -> int:
     async with _conn_lock:
         cur = _ensure_db().execute(
-            'INSERT INTO feedbacks (user_id, group_id, type, content, status, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?)',
-            (user_id, group_id, ftype, content, ST_PENDING, _now()),
+            'INSERT INTO feedbacks (user_id, group_id, type, content, status, created_at, images) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (user_id, group_id, ftype, content, ST_PENDING, _now(),
+             json.dumps(images or [], ensure_ascii=False)),
         )
         _ensure_db().commit()
         return cur.lastrowid
@@ -252,6 +274,17 @@ async def _user_today_count(user_id: str) -> int:
     return row['c']
 
 
+async def _next_unread_reply(user_id: str) -> dict | None:
+    """最早一条 已回复+未查看+提醒不足两次 的反馈。"""
+    async with _conn_lock:
+        row = _ensure_db().execute(
+            "SELECT * FROM feedbacks WHERE user_id=? AND reply != '' "
+            'AND viewed=0 AND notified<2 ORDER BY id LIMIT 1',
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 async def _user_last_time(user_id: str) -> str:
     async with _conn_lock:
         row = _ensure_db().execute(
@@ -285,13 +318,18 @@ async def _baidu_censor_token(key: str, secret: str) -> str:
     return token
 
 
+async def _baidu_keypair() -> tuple[str, str]:
+    key = (await _get_cfg('baidu_key', '')) or _BAIDU_DEFAULT_KEY
+    secret = (await _get_cfg('baidu_secret', '')) or _BAIDU_DEFAULT_SECRET
+    return key, secret
+
+
 async def _censor_text(text: str) -> tuple[bool, str]:
     """内容审核: 返回 (是否通过, 原因)。未开启审核直接通过;
     审核异常/疑似按通过处理, 仅明确不合规拒绝。"""
     if await _get_cfg('censor_enabled', '1') != '1':
         return True, ''
-    key = (await _get_cfg('baidu_key', '')) or _BAIDU_DEFAULT_KEY
-    secret = (await _get_cfg('baidu_secret', '')) or _BAIDU_DEFAULT_SECRET
+    key, secret = await _baidu_keypair()
     if not key or not secret:
         return True, ''
     try:
@@ -311,6 +349,147 @@ async def _censor_text(text: str) -> tuple[bool, str]:
     except Exception as exc:
         log.warning(f'百度内容审核调用失败: {exc}')
         return True, ''
+
+
+async def _censor_image(img_bytes: bytes) -> tuple[bool, str]:
+    """图片审核 (鉴黄等): 返回 (是否通过, 原因)。未开启直接通过;
+    审核异常/疑似按通过处理, 仅明确不合规拒绝。"""
+    if await _get_cfg('img_censor_enabled', '1') != '1':
+        return True, ''
+    key, secret = await _baidu_keypair()
+    if not key or not secret:
+        return True, ''
+    try:
+        token = await _baidu_censor_token(key, secret)
+        if not token:
+            return True, ''
+        url = 'https://aip.baidubce.com/rest/2.0/solution/v1/img_censor/v2/user_defined'
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as sess:
+            async with sess.post(url, params={'access_token': token},
+                                 data={'image': base64.b64encode(img_bytes).decode()}) as r:
+                data = await r.json(content_type=None)
+        if data.get('conclusionType') == 2:
+            items = data.get('data') or []
+            reason = items[0].get('msg', '图片违规') if items else '图片违规'
+            return False, reason
+        return True, ''
+    except Exception as exc:
+        log.warning(f'百度图片审核调用失败: {exc}')
+        return True, ''
+
+
+# ==================== 图片处理 ====================
+
+_IMG_NAME_RE = re.compile(r'^[0-9A-Fa-f]{32}\.(jpg|png|gif|webp)$')
+
+
+def _extract_image_urls(event) -> list[str]:
+    urls = []
+    for att in (getattr(event, 'attachments', None) or []):
+        if not isinstance(att, dict):
+            continue
+        if not (att.get('content_type', '') or '').startswith('image/'):
+            continue
+        u = (att.get('url', '') or '').strip()
+        if not u:
+            continue
+        if not u.startswith('http'):
+            u = 'https://' + u
+        urls.append(u)
+    return urls[:5]
+
+
+async def _download_image(url: str) -> bytes | None:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as sess:
+            async with sess.get(url) as r:
+                if r.status != 200:
+                    return None
+                return await r.read()
+    except Exception as exc:
+        log.warning(f'下载反馈图片失败: {exc}')
+        return None
+
+
+def _img_ext(data: bytes) -> str:
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'png'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'gif'
+    if data[8:12] == b'WEBP':
+        return 'webp'
+    return 'jpg'
+
+
+async def _backup_image(fid_hint: str, url: str, img_bytes: bytes) -> dict:
+    """备份图片: 优先发到子频道图床拼永久链接, 失败/未配置则存本地。
+    返回 {'url': 永久链接} 或 {'local': 文件名}。"""
+    md5 = hashlib.md5(img_bytes).hexdigest().upper()
+    channel = (await _get_cfg('sub_channel_id', '')).strip()
+    if channel:
+        sender = _any_sender()
+        if sender is not None:
+            try:
+                await sender.send_to_channel(
+                    channel, f'反馈图床备份 {fid_hint} | MD5:{md5}', image=url)
+                return {'url': f'https://gchat.qpic.cn/qmeetpic/0/0-0-{md5}/0', 'md5': md5}
+            except Exception as exc:
+                log.warning(f'反馈图片频道备份失败, 转存本地: {exc}')
+    fname = f'{md5}.{_img_ext(img_bytes)}'
+    with open(os.path.join(_IMG_DIR, fname), 'wb') as f:
+        f.write(img_bytes)
+    return {'local': fname, 'md5': md5}
+
+
+# ==================== 主动消息 ====================
+
+def _any_sender():
+    from core.bot.manager import _bot_manager_ref
+
+    if not _bot_manager_ref:
+        return None
+    for bot in _bot_manager_ref._bots.values():
+        sender = getattr(bot, 'sender', None)
+        if sender is not None:
+            return sender
+    return None
+
+
+def _query_buttons(fid: int):
+    return [[{'text': f'查询反馈 {fid}', 'data': f'查询反馈 {fid}', 'enter': True}]]
+
+
+def _notify_text(fid: int) -> str:
+    return (f'## 📨 你的反馈 #{fid} 有新回复啦\n'
+            f'发送 **查询反馈 {fid}** 或点下方按钮查看~')
+
+
+async def _notify_reply(fid: int) -> None:
+    """回复后主动提醒用户; 失败则保持 notified=0, 等用户下次发言时被动提醒。"""
+    if await _get_cfg('notify_enabled', '1') != '1':
+        return
+    fb = await _get_feedback(fid)
+    if not fb or not fb['reply']:
+        return
+    sender = _any_sender()
+    if sender is None:
+        return
+    content = _notify_text(fid)
+    buttons = _query_buttons(fid)
+    try:
+        if fb['group_id']:
+            ok, _data, _payload = await sender.send_to_group(
+                fb['group_id'], content, buttons=buttons, skip_suffix=True)
+        else:
+            ok, _data, _payload = await sender.send_to_user(
+                fb['user_id'], content, buttons=buttons, skip_suffix=True)
+    except Exception as exc:
+        log.warning(f'反馈 #{fid} 主动提醒发送异常: {exc}')
+        ok = False
+    if ok:
+        await _update_feedback(fid, notified=1)
+    else:
+        log.info(f'反馈 #{fid} 主动提醒失败, 转下次发言时被动提醒')
 
 
 # ==================== 权限 ====================
@@ -369,7 +548,8 @@ async def cmd_feedback(event, match):
     if await _get_cfg('enabled', '1') != '1':
         return
     prefix, content = match.group(1), (match.group(2) or '').strip()
-    if not content:
+    image_urls = _extract_image_urls(event)
+    if not content and not image_urls:
         if prefix in ('反馈',):
             return await event.reply(_HELP_MD, skip_suffix=True)
         return
@@ -377,7 +557,7 @@ async def cmd_feedback(event, match):
     if not uid:
         return
 
-    if len(content) < MIN_LEN:
+    if not image_urls and len(content) < MIN_LEN:
         return await event.reply(f'⚠️ 内容太短啦，至少 {MIN_LEN} 字，说得越详细越好~')
     if len(content) > MAX_LEN:
         return await event.reply(f'⚠️ 内容超过 {MAX_LEN} 字上限，精简一下再发~')
@@ -397,17 +577,32 @@ async def cmd_feedback(event, match):
         return await event.reply(f'⚠️ 今天已提交 {daily} 条反馈啦，明天再来吧~')
 
     # 内容审核
-    ok, reason = await _censor_text(content)
-    if not ok:
-        return await event.reply(f'⚠️ 内容未通过审核（{reason}），请修改后重新提交')
+    if content:
+        ok, reason = await _censor_text(content)
+        if not ok:
+            return await event.reply(f'⚠️ 内容未通过审核（{reason}），请修改后重新提交')
+
+    # 图片: 下载 -> 审核 (鉴黄等) -> 备份图床/存本地
+    images = []
+    for url in image_urls:
+        img_bytes = await _download_image(url)
+        if img_bytes is None:
+            return await event.reply('⚠️ 图片下载失败，请重新发送试试~')
+        ok, reason = await _censor_image(img_bytes)
+        if not ok:
+            return await event.reply(f'⚠️ 图片未通过审核（{reason}），请更换图片后重新提交')
+        images.append(await _backup_image(f'用户{uid}', url, img_bytes))
 
     ftype = TYPES.get(prefix, '其他')
-    fid = await _add_feedback(uid, event.group_id or '', ftype, content)
+    fid = await _add_feedback(uid, event.group_id or '', ftype,
+                              content or '（图片反馈）', images)
+    img_line = f'> 图片：{len(images)} 张\n' if images else ''
     await event.reply(
         f'## ✅ 反馈提交成功\n'
         f'> 编号：**#{fid}**\n'
         f'> 分类：{ftype}\n'
         f'> 状态：{ST_PENDING}\n'
+        f'{img_line}'
         '***\n'
         f'发送 **查询反馈 {fid}** 可查看处理进度和回复~',
         skip_suffix=True,
@@ -451,6 +646,8 @@ async def cmd_query_feedback(event, match):
         lines += ['***', f"💬 **回复**（{fb['replied_at']}）：", fb['reply']]
     else:
         lines += ['***', '⏳ 暂未回复，请耐心等待~']
+    if fb['user_id'] == (event.user_id or '') and not fb['viewed']:
+        await _update_feedback(fid, viewed=1)
     await event.reply('\n'.join(lines), skip_suffix=True)
 
 
@@ -464,8 +661,10 @@ async def cmd_reply_feedback(event, match):
     if not fb:
         return await event.reply(f'⚠️ 反馈 #{fid} 不存在')
     await _update_feedback(fid, reply=reply, replied_at=_now(),
-                           status=ST_DONE if fb['status'] == ST_PENDING else fb['status'])
-    await event.reply(f'✅ 已回复反馈 #{fid}，用户发送「查询反馈 {fid}」即可看到')
+                           status=ST_DONE if fb['status'] == ST_PENDING else fb['status'],
+                           viewed=0, notified=0)
+    await event.reply(f'✅ 已回复反馈 #{fid}，将主动提醒用户查看')
+    asyncio.create_task(_notify_reply(fid))
 
 
 @handler(r'^处理反馈\s*(\d+)\s+(待处理|处理中|已完成|已拒绝)$', name='处理反馈',
@@ -485,6 +684,27 @@ async def cmd_set_admin(event, match):
     uid = match.group(1).strip()
     await _set_cfg('super_admin', uid)
     await event.reply(f'✅ 已设置反馈唯一管理员: {uid}')
+
+
+@handler(r'', name='回复提醒', desc='用户发言时被动提醒未查看的反馈回复 (最多提醒两次)',
+         event_types=['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE',
+                      'C2C_MESSAGE_CREATE', 'DIRECT_MESSAGE_CREATE'],
+         ignore_at_check=True, priority=-100)
+async def on_message_remind(event, match):
+    uid = event.user_id or ''
+    if not uid:
+        return
+    if await _get_cfg('notify_enabled', '1') != '1':
+        return
+    text = (getattr(event, 'content', '') or '').strip()
+    if text.startswith(('查询反馈', '我的反馈')):
+        return
+    fb = await _next_unread_reply(uid)
+    if not fb:
+        return
+    await _update_feedback(fb['id'], notified=fb['notified'] + 1)
+    await event.reply(_notify_text(fb['id']), buttons=_query_buttons(fb['id']),
+                      skip_suffix=True)
 
 
 @handler(r'^删除反馈\s*(\d+)$', name='删除反馈', desc='删除自己的反馈 (管理员可删任意)')
@@ -514,18 +734,21 @@ async def _body(request):
 
 @register_route('GET', f'{_API}/status')
 async def api_status(request):
-    cfg = await _all_cfg()
+    c = await _all_cfg()
     stats = await _feedback_stats()
     return _json({
         'success': True,
         'data': {
-            'enabled': cfg.get('enabled', '1') == '1',
-            'cooldown': int(cfg.get('cooldown', '60') or 60),
-            'daily_limit': int(cfg.get('daily_limit', '5') or 5),
-            'censor_enabled': cfg.get('censor_enabled', '1') == '1',
-            'super_admin': cfg.get('super_admin', ''),
-            'baidu_key': cfg.get('baidu_key', ''),
-            'baidu_secret': cfg.get('baidu_secret', ''),
+            'enabled': c.get('enabled', '1') == '1',
+            'cooldown': int(c.get('cooldown', '60') or 60),
+            'daily_limit': int(c.get('daily_limit', '5') or 5),
+            'censor_enabled': c.get('censor_enabled', '1') == '1',
+            'img_censor_enabled': c.get('img_censor_enabled', '1') == '1',
+            'notify_enabled': c.get('notify_enabled', '1') == '1',
+            'sub_channel_id': c.get('sub_channel_id', ''),
+            'super_admin': c.get('super_admin', ''),
+            'baidu_key': c.get('baidu_key', ''),
+            'baidu_secret': c.get('baidu_secret', ''),
             **stats,
         },
     })
@@ -538,6 +761,12 @@ async def api_config(request):
         await _set_cfg('enabled', '1' if body['enabled'] else '0')
     if 'censor_enabled' in body:
         await _set_cfg('censor_enabled', '1' if body['censor_enabled'] else '0')
+    if 'img_censor_enabled' in body:
+        await _set_cfg('img_censor_enabled', '1' if body['img_censor_enabled'] else '0')
+    if 'notify_enabled' in body:
+        await _set_cfg('notify_enabled', '1' if body['notify_enabled'] else '0')
+    if 'sub_channel_id' in body:
+        await _set_cfg('sub_channel_id', str(body['sub_channel_id'] or '').strip())
     if 'cooldown' in body:
         try:
             cd = max(0, int(body['cooldown']))
@@ -570,8 +799,24 @@ async def api_list(request):
     keyword = request.query.get('q', '').strip()
     rows, total = await _list_feedbacks(PAGE_SIZE, (page - 1) * PAGE_SIZE,
                                         status=status, ftype=ftype, keyword=keyword)
+    for r in rows:
+        try:
+            r['images'] = json.loads(r.get('images') or '[]')
+        except (TypeError, ValueError):
+            r['images'] = []
     return _json({'success': True, 'data': rows, 'total': total,
                   'page': page, 'page_size': PAGE_SIZE})
+
+
+@register_route('GET', f'{_API}/image')
+async def api_image(request):
+    name = (request.query.get('name', '') or '').strip()
+    if not _IMG_NAME_RE.match(name):
+        return _json({'success': False, 'message': '非法文件名'}, status=400)
+    path = os.path.join(_IMG_DIR, name)
+    if not os.path.isfile(path):
+        return _json({'success': False, 'message': '图片不存在'}, status=404)
+    return web.FileResponse(path)
 
 
 @register_route('POST', f'{_API}/reply')
@@ -586,10 +831,17 @@ async def api_reply(request):
     if not fb:
         return _json({'success': False, 'message': f'反馈 #{fid} 不存在'}, status=404)
     fields = {'reply': reply, 'replied_at': _now() if reply else ''}
-    if reply and fb['status'] == ST_PENDING:
-        fields['status'] = ST_DONE
+    if reply:
+        fields['viewed'] = 0
+        fields['notified'] = 0
+        if fb['status'] == ST_PENDING:
+            fields['status'] = ST_DONE
+    else:
+        fields['viewed'] = 1
     await _update_feedback(fid, **fields)
-    return _json({'success': True, 'message': '已回复' if reply else '已清除回复'})
+    if reply:
+        asyncio.create_task(_notify_reply(fid))
+    return _json({'success': True, 'message': '已回复, 将主动提醒用户' if reply else '已清除回复'})
 
 
 @register_route('POST', f'{_API}/update')
