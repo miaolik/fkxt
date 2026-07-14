@@ -65,6 +65,8 @@
   .badge.rejected{background:var(--danger-soft);color:var(--danger)}
   .badge.type{background:var(--bg3);color:var(--text2)}
   .fb-content{margin:10px 0 6px;font-size:15px;white-space:pre-wrap;word-break:break-all}
+  .fb-imgs{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+  .fb-imgs img{width:96px;height:96px;object-fit:cover;border-radius:var(--radius-sm);border:1px solid var(--border);cursor:pointer}
   .fb-meta{display:flex;gap:16px;color:var(--text3);font-size:12px;flex-wrap:wrap}
   .fb-reply{background:var(--bg3);border-radius:var(--radius-sm);padding:10px 12px;margin-top:10px}
   .fb-reply .rt{color:var(--accent);font-weight:700;font-size:13px;margin-bottom:4px}
@@ -145,6 +147,15 @@
         <label class="switch"><input type="checkbox" id="cfg-enabled"><span class="slider"></span></label></div>
       <div class="form-row"><label>内容百度审核</label>
         <label class="switch"><input type="checkbox" id="cfg-censor"><span class="slider"></span></label></div>
+      <div class="form-row"><label>图片百度审核</label>
+        <label class="switch"><input type="checkbox" id="cfg-imgcensor"><span class="slider"></span></label>
+        <span class="muted">用户提交的图片先鉴黄等审核, 通过才保存展示</span></div>
+      <div class="form-row"><label>回复主动提醒</label>
+        <label class="switch"><input type="checkbox" id="cfg-notify"><span class="slider"></span></label>
+        <span class="muted">回复后主动提醒; 失败转下次发言提醒, 最多两次, 查看后不再提</span></div>
+      <div class="form-row"><label>图床子频道 ID</label>
+        <input type="text" id="cfg-channel" placeholder="留空则图片存本地" style="width:280px">
+        <span class="muted">图片备份到该子频道并拼永久链接</span></div>
       <div class="form-row"><label>提交冷却 (秒)</label>
         <input type="number" id="cfg-cooldown" min="0" style="width:110px"></div>
       <div class="form-row"><label>每人每日上限</label>
@@ -202,6 +213,9 @@ async function loadStatus(){
   $('st-replied').textContent = d.replied||0;
   $('cfg-enabled').checked = !!d.enabled;
   $('cfg-censor').checked = !!d.censor_enabled;
+  $('cfg-imgcensor').checked = !!d.img_censor_enabled;
+  $('cfg-notify').checked = !!d.notify_enabled;
+  $('cfg-channel').value = d.sub_channel_id||'';
   $('cfg-cooldown').value = d.cooldown!=null?d.cooldown:60;
   $('cfg-daily').value = d.daily_limit!=null?d.daily_limit:5;
   $('cfg-admin').value = d.super_admin||'';
@@ -213,6 +227,9 @@ async function saveConfig(){
   const j = await api('/config','POST',{
     enabled: $('cfg-enabled').checked,
     censor_enabled: $('cfg-censor').checked,
+    img_censor_enabled: $('cfg-imgcensor').checked,
+    notify_enabled: $('cfg-notify').checked,
+    sub_channel_id: $('cfg-channel').value.trim(),
     cooldown: parseInt($('cfg-cooldown').value||'0',10),
     daily_limit: parseInt($('cfg-daily').value||'0',10),
     super_admin: $('cfg-admin').value.trim(),
@@ -222,16 +239,30 @@ async function saveConfig(){
   toast(j.message || (j.success?'已保存':'保存失败'));
 }
 
+function imgSrc(im){
+  if(im.url) return im.url;
+  if(im.local) return API+'/image?name='+encodeURIComponent(im.local)+'&token='+TOKEN;
+  return '';
+}
+
 function fbCard(r){
   const cls = STATUS_CLS[r.status]||'pending';
   const badge = r.reply
     ? '<span class="badge done">✔ 已回复</span>'
     : `<span class="badge ${cls}">${r.status==='待处理'?'🕐 ':''}${esc(r.status)}</span>`;
+  const imgs = (r.images&&r.images.length) ? `
+    <div class="fb-imgs">${r.images.map(im=>{
+      const s = imgSrc(im);
+      return s?`<img src="${esc(s)}" onclick="window.open('${esc(s)}')">`:'';
+    }).join('')}</div>` : '';
+  const notify = r.reply
+    ? `<span class="muted">${r.viewed?'✔ 用户已查看':('⏳ 未查看·已提醒'+(r.notified||0)+'次')}</span>`
+    : '';
   const reply = r.reply ? `
     <div class="fb-reply">
       <div class="rt">💬 回复</div>
       <div class="rc">${esc(r.reply)}</div>
-      <div class="muted" style="margin-top:4px">⏱ ${esc(r.replied_at||'')}</div>
+      <div class="muted" style="margin-top:4px">⏱ ${esc(r.replied_at||'')} ${notify}</div>
     </div>` : '';
   return `<div class="card" id="fb-${r.id}">
     <div class="fb-head">
@@ -239,6 +270,7 @@ function fbCard(r){
       <span>${'<span class="badge type">'+esc(r.type)+'</span> '}${badge}</span>
     </div>
     <div class="fb-content">${esc(r.content)}</div>
+    ${imgs}
     <div class="fb-meta">
       <span>👤 ${esc(r.user_id)}</span>
       ${r.group_id?`<span>👥 ${esc(r.group_id)}</span>`:''}
