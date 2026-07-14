@@ -411,6 +411,40 @@ async def _download_image(url: str) -> bytes | None:
         return None
 
 
+def _img_size(data: bytes) -> tuple[int, int]:
+    """从图片字节解析宽高 (PNG/GIF/WEBP/JPEG), 失败返回 (0, 0)。"""
+    try:
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            return int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+        if data[:6] in (b'GIF87a', b'GIF89a'):
+            return int.from_bytes(data[6:8], 'little'), int.from_bytes(data[8:10], 'little')
+        if data[8:12] == b'WEBP':
+            fmt = data[12:16]
+            if fmt == b'VP8X':
+                return (int.from_bytes(data[24:27], 'little') + 1,
+                        int.from_bytes(data[27:30], 'little') + 1)
+            if fmt == b'VP8L':
+                bits = int.from_bytes(data[21:25], 'little')
+                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            if fmt == b'VP8 ':
+                return (int.from_bytes(data[26:28], 'little') & 0x3FFF,
+                        int.from_bytes(data[28:30], 'little') & 0x3FFF)
+        if data[:2] == b'\xff\xd8':  # JPEG: 扫 SOFn 段
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    return (int.from_bytes(data[i + 7:i + 9], 'big'),
+                            int.from_bytes(data[i + 5:i + 7], 'big'))
+                i += 2 + int.from_bytes(data[i + 2:i + 4], 'big')
+    except Exception:
+        pass
+    return 0, 0
+
+
 def _img_ext(data: bytes) -> str:
     if data[:8] == b'\x89PNG\r\n\x1a\n':
         return 'png'
@@ -423,8 +457,9 @@ def _img_ext(data: bytes) -> str:
 
 async def _backup_image(fid_hint: str, url: str, img_bytes: bytes) -> dict:
     """备份图片: 优先发到子频道图床拼永久链接, 失败/未配置则存本地。
-    返回 {'url': 永久链接} 或 {'local': 文件名}。"""
+    返回 {'url': 永久链接, 'w', 'h'} 或 {'local': 文件名, 'w', 'h'}。"""
     md5 = hashlib.md5(img_bytes).hexdigest().upper()
+    w, h = _img_size(img_bytes)
     channel = (await _get_cfg('sub_channel_id', '')).strip()
     if channel:
         sender = _any_sender()
@@ -432,13 +467,41 @@ async def _backup_image(fid_hint: str, url: str, img_bytes: bytes) -> dict:
             try:
                 await sender.send_to_channel(
                     channel, f'反馈图床备份 {fid_hint} | MD5:{md5}', image=url)
-                return {'url': f'https://gchat.qpic.cn/qmeetpic/0/0-0-{md5}/0', 'md5': md5}
+                return {'url': f'https://gchat.qpic.cn/qmeetpic/0/0-0-{md5}/0',
+                        'md5': md5, 'w': w, 'h': h}
             except Exception as exc:
                 log.warning(f'反馈图片频道备份失败, 转存本地: {exc}')
     fname = f'{md5}.{_img_ext(img_bytes)}'
     with open(os.path.join(_IMG_DIR, fname), 'wb') as f:
         f.write(img_bytes)
-    return {'local': fname, 'md5': md5}
+    return {'local': fname, 'md5': md5, 'w': w, 'h': h}
+
+
+def _md_image_lines(images_json: str) -> list[str]:
+    """反馈图片 -> MD 图片行 ![#宽px #高px](url); 仅有永久链接的可在聊天展示。"""
+    try:
+        images = json.loads(images_json or '[]')
+    except (TypeError, ValueError):
+        return []
+    lines = []
+    local_cnt = 0
+    for im in images:
+        if not isinstance(im, dict):
+            continue
+        url = im.get('url', '')
+        if not url:
+            local_cnt += 1
+            continue
+        w, h = int(im.get('w') or 0), int(im.get('h') or 0)
+        if w <= 0 or h <= 0:
+            w, h = 300, 300
+        elif w > 400:  # 等比缩到适合聊天窗口的宽度
+            h = max(1, round(h * 400 / w))
+            w = 400
+        lines.append(f'![#{w}px #{h}px]({url})')
+    if local_cnt:
+        lines.append(f'🖼 另有 {local_cnt} 张图片已存后台, 请在管理面板查看')
+    return lines
 
 
 # ==================== 主动消息 ====================
@@ -642,6 +705,7 @@ async def cmd_query_feedback(event, match):
         '***',
         fb['content'],
     ]
+    lines += _md_image_lines(fb.get('images', '[]'))
     if fb['reply']:
         lines += ['***', f"💬 **回复**（{fb['replied_at']}）：", fb['reply']]
     else:
