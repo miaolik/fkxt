@@ -400,7 +400,8 @@ def _extract_image_urls(event) -> list[str]:
     return urls[:5]
 
 
-_ATTACH_URL_RE = re.compile(r'https?://(?:multimedia\.nt\.qq\.com\.cn|gchat\.qpic\.cn)/\S+')
+_ATTACH_URL_RE = re.compile(
+    r'<?https?://(?:multimedia\.nt\.qq\.com\.cn|gchat\.qpic\.cn)/[^\s<>]*>?')
 
 
 def _strip_image_urls(content: str, image_urls: list[str]) -> str:
@@ -966,7 +967,17 @@ async def api_delete(request):
 @on_load
 async def _init():
     async with _conn_lock:
-        _ensure_db()
+        conn = _ensure_db()
+        # 一次性清洗: 早期版本把图片附件原始URL存进了反馈内容
+        rows = conn.execute(
+            "SELECT id, content FROM feedbacks WHERE content LIKE '%multimedia.nt.qq.com.cn%'"
+        ).fetchall()
+        for r in rows:
+            cleaned = _ATTACH_URL_RE.sub('', r['content']).strip() or '（图片反馈）'
+            conn.execute('UPDATE feedbacks SET content=? WHERE id=?', (cleaned, r['id']))
+        if rows:
+            conn.commit()
+            log.info(f'已清洗 {len(rows)} 条反馈内容中的图片原始URL')
     register_page(
         key=_PAGE_KEY,
         label='反馈系统',
