@@ -39,6 +39,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -481,13 +482,13 @@ async def _backup_image(fid_hint: str, url: str, img_bytes: bytes) -> dict:
                 await sender.send_to_channel(
                     channel, f'反馈图床备份 {fid_hint} | MD5:{md5}', image=url)
                 return {'url': f'https://gchat.qpic.cn/qmeetpic/0/0-0-{md5}/0',
-                        'md5': md5, 'w': w, 'h': h}
+                        'src': 'channel', 'md5': md5, 'w': w, 'h': h}
             except Exception as exc:
                 log.warning(f'反馈图片频道备份失败, 转存本地: {exc}')
     fname = f'{md5}.{_img_ext(img_bytes)}'
     with open(os.path.join(_IMG_DIR, fname), 'wb') as f:
         f.write(img_bytes)
-    return {'local': fname, 'md5': md5, 'w': w, 'h': h}
+    return {'local': fname, 'src': 'local', 'md5': md5, 'w': w, 'h': h}
 
 
 def _md_image_lines(images_json: str) -> list[str]:
@@ -533,6 +534,12 @@ def _any_sender():
 
 def _query_buttons(fid: int):
     return [[{'text': f'查询反馈 {fid}', 'data': f'查询反馈 {fid}', 'enter': True}]]
+
+
+def _submit_buttons(fid: int):
+    """提交成功后的回车指令按钮: 查询本条反馈 / 我的反馈。"""
+    return [[{'text': f'查询反馈 {fid}', 'data': f'查询反馈 {fid}', 'enter': True},
+             {'text': '我的反馈', 'data': '我的反馈', 'enter': True}]]
 
 
 def _notify_text(fid: int) -> str:
@@ -682,7 +689,8 @@ async def cmd_feedback(event, match):
         f'> 状态：{ST_PENDING}\n'
         f'{img_line}'
         '***\n'
-        f'发送 **查询反馈 {fid}** 可查看处理进度和回复~',
+        f'发送 **查询反馈 {fid}** 或点下方按钮可查看处理进度和回复~',
+        buttons=_submit_buttons(fid),
         skip_suffix=True,
     )
 
@@ -885,6 +893,29 @@ async def api_list(request):
             r['images'] = []
     return _json({'success': True, 'data': rows, 'total': total,
                   'page': page, 'page_size': PAGE_SIZE})
+
+
+# 允许代理的远程图片域名 (频道图床/QQ图片, 浏览器直接访问会被防盗链拦截)
+_PROXY_HOSTS = ('gchat.qpic.cn', 'multimedia.nt.qq.com.cn')
+
+
+@register_route('GET', f'{_API}/imgproxy')
+async def api_imgproxy(request):
+    """后端代理拉取频道图床等远程图片, 解决 web 面板缩略图因防盗链无法显示的问题。"""
+    url = (request.query.get('url', '') or '').strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return _json({'success': False, 'message': '非法链接'}, status=400)
+    if parsed.scheme not in ('http', 'https') or parsed.hostname not in _PROXY_HOSTS:
+        return _json({'success': False, 'message': '非法链接'}, status=400)
+    data = await _download_image(url)
+    if data is None:
+        return _json({'success': False, 'message': '图片拉取失败'}, status=502)
+    ctype = {'png': 'image/png', 'gif': 'image/gif', 'webp': 'image/webp'}.get(
+        _img_ext(data), 'image/jpeg')
+    return web.Response(body=data, content_type=ctype,
+                        headers={'Cache-Control': 'public, max-age=86400'})
 
 
 @register_route('GET', f'{_API}/image')

@@ -240,7 +240,8 @@ async function saveConfig(){
 }
 
 function imgSrc(im){
-  if(im.url) return im.url;
+  // 频道图床等远程图有防盗链, 浏览器直接加载会失败, 走后端代理
+  if(im.url) return API+'/imgproxy?url='+encodeURIComponent(im.url)+'&token='+TOKEN;
   if(im.local) return API+'/image?name='+encodeURIComponent(im.local)+'&token='+TOKEN;
   return '';
 }
