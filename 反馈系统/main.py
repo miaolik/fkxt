@@ -520,12 +520,50 @@ def _md_image_lines(images_json: str) -> list[str]:
 
 # ==================== 主动消息 ====================
 
+def _allowed_bot_appids():
+    """读取框架「插件选择机器人」绑定, 返回本插件允许的 appid 集合; None 表示不限制。
+
+    框架的绑定只作用于 handler, 主动消息需自行检查。键为 插件名 或 插件名/文件名。"""
+    try:
+        from core.bot.manager import _bot_manager_ref
+
+        pm = getattr(_bot_manager_ref, '_plugin_manager', None) or getattr(_bot_manager_ref, 'plugin_manager', None)
+        if not pm or not hasattr(pm, 'get_plugin_bots'):
+            return None
+        pb = pm.get_plugin_bots()
+        if not pb:
+            return None
+        parts = (__name__ or '').split('.')
+        plugin = parts[1] if len(parts) >= 2 else ''
+        fname = parts[2] if len(parts) >= 3 else ''
+        keys = []
+        if plugin and fname:
+            keys.append(f'{plugin}/{fname}')
+        if plugin:
+            keys.append(plugin)
+        for key in keys:
+            bots = pb.get(key)
+            if bots is not None:
+                return frozenset(str(b) for b in bots) if bots else None
+        return None
+    except Exception:
+        return None
+
+
 def _any_sender():
     from core.bot.manager import _bot_manager_ref
 
     if not _bot_manager_ref:
         return None
-    for bot in _bot_manager_ref._bots.values():
+    bots = _bot_manager_ref._bots
+    ab = _allowed_bot_appids()
+    if ab:
+        for appid in ab:
+            bot = bots.get(appid)
+            sender = getattr(bot, 'sender', None) if bot else None
+            if sender is not None:
+                return sender
+    for bot in bots.values():
         sender = getattr(bot, 'sender', None)
         if sender is not None:
             return sender
